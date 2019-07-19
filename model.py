@@ -48,8 +48,8 @@ def dw(inp,trainning,nLay):
     nw['c'+str(0)]=inp
     szW={}
     szW = {key: (3,3,64,64) for key in range(2,nLay)}
-    szW[1]=(3,3,2,64)
-    szW[nLay]=(3,3,64,2)#最后的输出shape是2
+    szW[1]=(3,3,1,64)
+    szW[nLay]=(3,3,64,1)#最后的输出shape是2
 
     for i in np.arange(1,nLay+1):
         if i==nLay:
@@ -60,6 +60,7 @@ def dw(inp,trainning,nLay):
     with tf.name_scope('Residual'):
         shortcut=tf.identity(inp)
         dw=shortcut+nw['c'+str(nLay)]
+    print('---------',dw.shape)
     return dw
 
 
@@ -194,18 +195,76 @@ def makeModel(atb,csm,mask,training,nLayers,K,gradientMethod):
                         out['dc'+j]=dc(rhs,csm,mask,lam1)
     return out
 
-def process_layer(A,H,n,b)
+def newModel():
+    """
+    This is the main function that creates the model.
+
+    """
+    mask = gaussian2D()
+    A = tf.convert_to_tensor(mask,dtype=tf.float32)
+    ori = tf.Variable(tf.ones([1,50,50]), name="ori",dtype=tf.float32)
+    ori = tf.reshape(ori,[1,2500])  
+    b = tf.matmul(ori, A)
+    AT = tf.transpose(A)
+    X0 = tf.matmul(b,AT)
+    X0 = tf.reshape(X0,[50,50])
+    atb = tf.matmul(tf.add(b,b),AT)
+    atb = tf.reshape(atb,[1,50,50,1])
+    out={}
+    out['dc0']=atb
+    training = True
+    with tf.name_scope('myModel'):
+        with tf.variable_scope('Wts',reuse=tf.AUTO_REUSE):
+            for i in range(1,5+1):
+                j=str(i)
+                out['dw'+j]=dw(out['dc'+str(i-1)],training,5)
+                lam1=getLambda()
+                Zk = out['dw'+j]
+                if training:
+                    print(A.shape,b.shape)
+                    A = tf.reshape(A,[1,250,2500])
+                    b = tf.reshape(b,[1,250,1])
+                    out['dc'+j]=newDc(A,b,Zk,b)
+    with tf.Session() as sess:
+        sess.run(tf.global_variables_initializer())
+    #return out
+
+def newDc(A,b,Zk,noise):
+    def fn(tmp):
+        A,b,Zk,noise = tmp
+        print(A.shape)
+        AT = tf.transpose(A)
+        m = tf.add(b,noise)
+        #print(AT.shape,m.shape)
+        atb = tf.matmul(AT,m)
+        #print(atb.shape)
+        Xn = tf.matmul(AT,A)
+        NI = tf.eye(2500)
+        Xn0 = tf.add(Xn,NI)
+        Xn0 = tf.matrix_inverse(Xn0)#求逆
+        atb = tf.reshape(atb,[50,50,1])
+        Xn1 = tf.add(atb,Zk)
+        return tf.matmul(Xn0,Xn1)
+    inp = (A,b,Zk,noise)
+    rec=tf.map_fn(fn,inp,dtype=tf.float32,name='mapFn2' )
+    return rec
+"""
 def getModel():
     #sess = tf.Session()
     mask = gaussian2D()
-    mask = tf.convert_to_tensor(mask,dtype=tf.float32)
+    A = tf.convert_to_tensor(mask,dtype=tf.float32)
     ori = tf.Variable(tf.ones([50,50]), name="ori",dtype=tf.float32)
-    ori = tf.reshape(ori,[2500,1])  
-    b = tf.matmul(mask, ori)
-    b = tf.transpose(b)
-    tf.matrix_inverse()#求逆矩阵
+    ori = tf.reshape(ori,[1,2500])  
+    b = tf.matmul(ori, A)
+    AT = tf.transpose(A)
+    X0 = tf.matmul(b,AT)
+    X0 = tf.reshape(X0,[50,50])
+    rec = newDc(A,b,Zk,b)
+    atb = tf.matmul(AT,tf.add(b,b))
+    #tf.matrix_inverse()#求逆矩阵
     with tf.Session() as sess:
         sess.run(tf.global_variables_initializer())
         b = b.eval()
-        print('mask = ',mask.eval())
-getModel()
+        print('X0 = ',X0.eval().shape)
+"""
+newModel()

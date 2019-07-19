@@ -1,6 +1,6 @@
 import numpy as np
 
-def gaussian2D(shape=(250,2500), sigma=100):
+def gaussian2D(shape=(2500,250), sigma=100):
     m, n = [(ss - 1.) / 2. for ss in shape]
     y, x = np.ogrid[-m:m+1,-n:n+1]
 
