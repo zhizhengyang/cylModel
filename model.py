@@ -30,7 +30,6 @@ def createLayer(x, szW, trainning,lastLayer):
     W=tf.get_variable('W',shape=szW,initializer=tf.contrib.layers.xavier_initializer())
     x = tf.nn.conv2d(x, W, strides=[1, 1, 1, 1], padding='SAME')
     xbn=tf.layers.batch_normalization(x,training=trainning,fused=True,name='BN')
-
     if not(lastLayer):
         return tf.nn.relu(xbn)
     else:
@@ -195,20 +194,18 @@ def makeModel(atb,csm,mask,training,nLayers,K,gradientMethod):
                         out['dc'+j]=dc(rhs,csm,mask,lam1)
     return out
 
+def process_layer(A,H,n,b)
 def getModel():
     #sess = tf.Session()
     mask = gaussian2D()
-    print(mask[mask>0])
     mask = tf.convert_to_tensor(mask,dtype=tf.float32)
     ori = tf.Variable(tf.ones([50,50]), name="ori",dtype=tf.float32)
     ori = tf.reshape(ori,[2500,1])  
     b = tf.matmul(mask, ori)
-    print(b.shape)
     b = tf.transpose(b)
-    print(b.shape)
+    tf.matrix_inverse()#求逆矩阵
     with tf.Session() as sess:
         sess.run(tf.global_variables_initializer())
         b = b.eval()
-        print(b[b>0.01])
         print('mask = ',mask.eval())
 getModel()
