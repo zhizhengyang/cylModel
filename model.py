@@ -11,15 +11,13 @@ import tensorflow as tf
 import numpy as np
 from os.path import expanduser
 from utils import gaussian2D
+import os
+import glob
+from skimage import io, transform
 home = expanduser("~")
 epsilon=1e-5
 TFeps=tf.constant(1e-5,dtype=tf.float32)
-
-
-# function c2r contatenate complex input as new axis two two real inputs
-c2r=lambda x:tf.stack([tf.real(x),tf.imag(x)],axis=-1)
-#r2c takes the last dimension of real input and converts to complex
-r2c=lambda x:tf.complex(x[...,0],x[...,1])
+mask = gaussian2D()#观测矩阵
 
 def createLayer(x, szW, trainning,lastLayer):
     """
@@ -64,57 +62,8 @@ def dw(inp,trainning,nLay):
     return dw
 
 
-class Aclass:
-    """
-    This class is created to do the data-consistency (DC) step as described in paper.
-    """
-    def __init__(self, csm,mask,lam):
-        with tf.name_scope('Ainit'):
-            s=tf.shape(mask)
-            self.nrow,self.ncol=s[0],s[1]
-            self.pixels=self.nrow*self.ncol
-            self.mask=mask
-            self.csm=csm
-            self.SF=tf.complex(tf.sqrt(tf.to_float(self.pixels) ),0.)
-            self.lam=lam
-            #self.cgIter=cgIter
-            #self.tol=tol
-    def myAtA(self,img):
-        with tf.name_scope('AtA'):
-            coilImages=self.csm*img
-            kspace=  tf.fft2d(coilImages)/self.SF
-            temp=kspace*self.mask
-            coilImgs =tf.ifft2d(temp)*self.SF
-            coilComb= tf.reduce_sum(coilImgs*tf.conj(self.csm),axis=0)
-            coilComb=coilComb+self.lam*img
-        return coilComb
 
-def myCG(A,rhs):
-    """
-    This is my implementation of CG algorithm in tensorflow that works on
-    complex data and runs on GPU. It takes the class object as input.
-    """
-    rhs=r2c(rhs)
-    cond=lambda i,rTr,*_: tf.logical_and( tf.less(i,10), rTr>1e-10)
-    def body(i,rTr,x,r,p):
-        with tf.name_scope('cgBody'):
-            Ap=A.myAtA(p)
-            alpha = rTr / tf.to_float(tf.reduce_sum(tf.conj(p)*Ap))
-            alpha=tf.complex(alpha,0.)
-            x = x + alpha * p
-            r = r - alpha * Ap
-            rTrNew = tf.to_float( tf.reduce_sum(tf.conj(r)*r))
-            beta = rTrNew / rTr
-            beta=tf.complex(beta,0.)
-            p = r + beta * p
-        return i+1,rTrNew,x,r,p
 
-    x=tf.zeros_like(rhs)
-    i,r,p=0,rhs,rhs
-    rTr = tf.to_float( tf.reduce_sum(tf.conj(r)*r),)
-    loopVar=i,rTr,x,r,p
-    out=tf.while_loop(cond,body,loopVar,name='CGwhile',parallel_iterations=1)[2]
-    return c2r(out)
 
 def getLambda():
     """
@@ -124,110 +73,57 @@ def getLambda():
         lam = tf.get_variable(name='lam1', dtype=tf.float32, initializer=.05)
     return lam
 
-def callCG(rhs):
-    """
-    this function will call the function myCG on each image in a batch
-    """
-    G=tf.get_default_graph()
-    getnext=G.get_operation_by_name('getNext')
-    _,_,csm,mask=getnext.outputs
-    l=getLambda()
-    l2=tf.complex(l,0.)
-    def fn(tmp):
-        c,m,r=tmp
-        Aobj=Aclass(c,m,l2)
-        y=myCG(Aobj,r)
-        return y
-    inp=(csm,mask,rhs)
-    rec=tf.map_fn(fn,inp,dtype=tf.float32,name='mapFn2' )
-    return rec
+def getAtb(ori):
+    ori = ori.reshape((1,2500))  
+    b = np.matmul(ori, mask)
+    AT = np.transpose(mask)
+    atb = np.matmul(np.add(b,b),AT)
+    atb = atb.reshape((1,50,50,1))
+    return atb
 
-@tf.custom_gradient
-def dcManualGradient(x):
-    """
-    This function impose data consistency constraint. Rather than relying on
-    TensorFlow to calculate the gradient for the conjuagte gradient part.
-    We can calculate the gradient manually as well by using this function.
-    Please see section III (c) in the paper.
-    """
-    y=callCG(x)
-    def grad(inp):
-        out=callCG(inp)
-        return out
-    return y,grad
+def minibatches(inputs=None, targets=None, batch_size=1, shuffle=False):
+    assert len(inputs) == len(targets)
+    if shuffle:
+        indices = np.arange(len(inputs))
+        np.random.shuffle(indices)
+    for start_idx in range(0, len(inputs) - batch_size + 1,):
+        if shuffle:
+            excerpt = indices[start_idx:start_idx + batch_size]
+        else:
+            excerpt = slice(start_idx, start_idx + batch_size)
+        yield inputs[excerpt], targets[excerpt]
 
-
-def dc(rhs,csm,mask,lam1):
-    """
-    This function is called to create testing model. It apply CG on each image
-    in the batch.
-    """
-    lam2=tf.complex(lam1,0.)
-    def fn( tmp ):
-        c,m,r=tmp
-        Aobj=Aclass( c,m,lam2 )
-        y=myCG(Aobj,r)
-        return y
-    inp=(csm,mask,rhs)
-    rec=tf.map_fn(fn,inp,dtype=tf.float32,name='mapFn' )
-    return rec
-
-def makeModel(atb,csm,mask,training,nLayers,K,gradientMethod):
+def newModel(w, h, c):
     """
     This is the main function that creates the model.
 
     """
     out={}
-    out['dc0']=atb
-    with tf.name_scope('myModel'):
-        with tf.variable_scope('Wts',reuse=tf.AUTO_REUSE):
-            for i in range(1,K+1):
-                j=str(i)
-                out['dw'+j]=dw(out['dc'+str(i-1)],training,nLayers)
-                lam1=getLambda()
-                rhs=atb + lam1*out['dw'+j]
-                if gradientMethod=='AG':
-                    out['dc'+j]=dc(rhs,csm,mask,lam1)
-                elif gradientMethod=='MG':
-                    if training:
-                        out['dc'+j]=dcManualGradient(rhs)
-                    else:
-                        out['dc'+j]=dc(rhs,csm,mask,lam1)
-    return out
-
-def newModel():
-    """
-    This is the main function that creates the model.
-
-    """
-    mask = gaussian2D()
+    x = tf.placeholder(tf.float32, shape=[None, w, h,1], name='x')
+    y_ = tf.placeholder(tf.float32, shape=[None, w, h,1], name='y_')
     A = tf.convert_to_tensor(mask,dtype=tf.float32)
-    ori = tf.Variable(tf.ones([1,50,50]), name="ori",dtype=tf.float32)
-    ori = tf.reshape(ori,[1,2500])  
+    ori = tf.reshape(x,[1,2500])  
     b = tf.matmul(ori, A)
+    training = True
+
     AT = tf.transpose(A)
     X0 = tf.matmul(b,AT)
     X0 = tf.reshape(X0,[50,50])
     atb = tf.matmul(tf.add(b,b),AT)
     atb = tf.reshape(atb,[1,50,50,1])
-    out={}
-    out['dc0']=atb
-    training = True
+    out['dc0'] = atb
     with tf.name_scope('myModel'):
         with tf.variable_scope('Wts',reuse=tf.AUTO_REUSE):
             for i in range(1,5+1):
                 j=str(i)
                 out['dw'+j]=dw(out['dc'+str(i-1)],training,5)
-                lam1=getLambda()
+                #lam1=getLambda()可能会用，先留着
                 Zk = out['dw'+j]
                 if training:
-                    print(A.shape,b.shape)
                     A = tf.reshape(A,[1,250,2500])
                     b = tf.reshape(b,[1,250,1])
                     out['dc'+j]=newDc(A,b,Zk,b)
-    with tf.Session() as sess:
-        sess.run(tf.global_variables_initializer())
-    #return out
+    return out['dc'+str(5)],x,y_
 
 def newDc(A,b,Zk,noise):
     def fn(tmp):
@@ -250,23 +146,84 @@ def newDc(A,b,Zk,noise):
     rec=tf.map_fn(fn,inp,dtype=tf.float32,name='mapFn2' )
     rec = tf.reshape(rec,[1,50,50,1])
     return rec
-"""
-def getModel():
-    #sess = tf.Session()
-    mask = gaussian2D()
-    A = tf.convert_to_tensor(mask,dtype=tf.float32)
-    ori = tf.Variable(tf.ones([50,50]), name="ori",dtype=tf.float32)
-    ori = tf.reshape(ori,[1,2500])  
-    b = tf.matmul(ori, A)
-    AT = tf.transpose(A)
-    X0 = tf.matmul(b,AT)
-    X0 = tf.reshape(X0,[50,50])
-    rec = newDc(A,b,Zk,b)
-    atb = tf.matmul(AT,tf.add(b,b))
-    #tf.matrix_inverse()#求逆矩阵
-    with tf.Session() as sess:
-        sess.run(tf.global_variables_initializer())
-        b = b.eval()
-        print('X0 = ',X0.eval().shape)
-"""
-newModel()
+
+def runable(x_train, y_train, optimizer, loss, x, y_, x_val, y_val):
+    # 训练和测试数据，可将n_epoch设置更大一些
+    n_epoch = 50
+    batch_size = 1
+    sess = tf.InteractiveSession()
+    saver = tf.train.Saver()
+    sess.run(tf.global_variables_initializer())
+    for epoch in range(n_epoch):
+        # training
+        train_loss,  n_batch = 0, 0
+        for x_train_a, y_train_a in minibatches(x_train, y_train, batch_size, shuffle=True):
+            _, err = sess.run([optimizer, loss], feed_dict={x: x_train_a, y_: y_train_a})
+            train_loss += err
+            n_batch += 1
+            print("train loss: %f" % (train_loss / n_batch))
+        print('=======',epoch)
+        #print("train loss: %f" % (train_loss))
+        saver.save(sess, 'save_model/model_name.ckpt')
+        print('model saved in file:save_model')
+    sess.close()
+
+def read_img(label_path,path,w, h):
+    cate = os.listdir(path)
+    # print(cate)
+    label_dir = 'data/'     #label的地址
+    imgs = []
+    labels = []
+    i = 0
+    print('Start read the image ...')
+    for im in glob.glob(path + '/*.jpg'):
+        # print('Reading The Image: %s' % im)
+        img = io.imread(im)
+        img = transform.resize(img, (w, h))
+        label_img = io.imread(label_path+im.split('/')[-1])
+        #img = getAtb(img[:,:,0])
+        imgs.append(img[:,:,0].reshape((50,50,1)))
+        labels.append(img[:,:,0].reshape((50,50,1)))
+        if i % 100 == 0:
+            print(i)
+        if i > 1000:
+            break
+        i = i + 1
+    print('Finished ...')
+
+    return np.asarray(imgs, np.float), np.asarray(labels, np.float32)
+
+def segmentation(data, label, ratio=0.8):
+    num_example = data.shape[0]
+    s = np.int(num_example * ratio)
+    x_train = data[:s]
+    y_train = label[:s]
+    x_val = data[s:]
+    y_val = label[s:]
+    print('------------',x_train.shape)
+    return x_train, y_train, x_val, y_val
+
+def accUNET(conv1, y_):
+    loss = tf.reduce_sum(tf.square(conv1 - y_))
+    optimizer = tf.train.AdamOptimizer(learning_rate=0.001).minimize(loss)
+    return loss, optimizer
+
+if __name__ == '__main__':
+    imgpath = 'data/'
+    w = 50
+    h = 50
+    c = 1
+
+    ratio = 0.8  # 选取训练集的比例
+    data, label = read_img(label_path=imgpath,path=imgpath, w=w, h=h)
+    x_train, y_train, x_val, y_val = segmentation(data=data, label=label, ratio=ratio)
+
+    pre,x, y_ = newModel(w=w, h=h, c=c)
+
+    loss, optimizer = accUNET(pre, y_=y_)
+
+    runable(x_train=x_train, y_train=y_train, optimizer=optimizer, loss=loss,
+             x=x, y_=y_, x_val=x_val, y_val=y_val)
+
+
+#newModel()
