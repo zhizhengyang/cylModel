@@ -244,9 +244,11 @@ def newDc(A,b,Zk,noise):
         Xn0 = tf.matrix_inverse(Xn0)#求逆
         atb = tf.reshape(atb,[50,50,1])
         Xn1 = tf.add(atb,Zk)
+        Xn1 = tf.reshape(Xn1,[2500,1])
         return tf.matmul(Xn0,Xn1)
     inp = (A,b,Zk,noise)
     rec=tf.map_fn(fn,inp,dtype=tf.float32,name='mapFn2' )
+    rec = tf.reshape(rec,[1,50,50,1])
     return rec
 """
 def getModel():
